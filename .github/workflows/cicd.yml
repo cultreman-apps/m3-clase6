@@ -1,0 +1,220 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: 1 · Análisis estático y unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Instalar dependencias
+        run: pip install --requirement requirements-dev.txt
+
+      - name: Analizar calidad con Ruff
+        run: ruff check .
+
+      - name: Comprobar formato con Ruff
+        run: ruff format --check .
+
+      - name: Analizar seguridad con Bandit
+        run: bandit --recursive app
+
+      - name: Ejecutar unit tests
+        run: pytest --verbose tests/unit
+
+  regression:
+    name: 2 · Docker Compose y regresión
+    needs: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar el cliente de pruebas
+        run: pip install pytest==9.1.1 requests==2.34.2
+
+      - name: Levantar el entorno efímero
+        env:
+          APP_ENV: regression
+          APP_VERSION: ${{ github.sha }}
+        run: docker compose up --detach --build --wait
+
+      - name: Ejecutar regresión HTTP
+        env:
+          BASE_URL: http://127.0.0.1:8000
+        run: pytest --verbose --strict-markers -m regression tests/regression
+
+      - name: Mostrar logs si algo falló
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Destruir el entorno efímero
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  manifests:
+    name: 3 · Validar manifiestos de Kubernetes
+    needs: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v6
+
+      - name: Renderizar el estado de producción
+        run: kubectl kustomize gitops/production > manifests-rendered.yaml
+
+      - name: Validar recursos contra los esquemas de Kubernetes
+        run: >-
+          docker run --rm
+          --volume "${{ github.workspace }}:/workspace"
+          ghcr.io/yannh/kubeconform:v0.7.0
+          -strict
+          -summary
+          /workspace/manifests-rendered.yaml
+
+  ready:
+    name: Listo para merge
+    if: github.event_name == 'pull_request' && always()
+    needs: [quality, regression, manifests]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verificar todos los controles
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+          MANIFESTS_RESULT: ${{ needs.manifests.result }}
+        run: python scripts/ci_helpers.py summary
+
+  publish:
+    name: 4 · Publicar imagen
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [regression, manifests]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_name: ${{ steps.image.outputs.image_name }}
+      image_tag: ${{ steps.image.outputs.image_tag }}
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Calcular la imagen inmutable
+        id: image
+        run: python scripts/ci_helpers.py metadata
+
+      - name: Iniciar sesión en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preparar metadatos OCI
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.image_name }}
+          tags: |
+            type=raw,value=${{ steps.image.outputs.image_tag }}
+            type=raw,value=latest
+
+      - name: Construir y publicar
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+
+  promote:
+    name: 5 · Promover estado GitOps
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    environment:
+      name: production
+
+    concurrency:
+      group: production-promotion
+      cancel-in-progress: false
+
+    steps:
+      - name: Descargar el código aprobado
+        uses: actions/checkout@v6
+        with:
+          path: source
+
+      - name: Descargar la rama GitOps
+        uses: actions/checkout@v6
+        with:
+          ref: gitops
+          fetch-depth: 0
+          path: desired
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Registrar la promoción
+        run: >-
+          python source/scripts/ci_helpers.py promote
+          --source source
+          --desired desired
+          --image-name "${{ needs.publish.outputs.image_name }}"
+          --image-tag "${{ needs.publish.outputs.image_tag }}"
+          --source-sha "${{ github.sha }}"

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: production
+resources:
+  - ../../k8s/base
+images:
+  - name: formatec-api
+    newName: ghcr.io/replace/after-first-workflow
+    newTag: bootstrap
+labels:
+  - pairs:
+      app.kubernetes.io/version: bootstrap
+    includeSelectors: false
+    includeTemplates: true

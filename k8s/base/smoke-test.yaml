@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: formatec-api-smoke
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          image: formatec-api:bootstrap
+          imagePullPolicy: Always
+          command:
+            - python
+            - -c
+          args:
+            - |
+              import json
+              import urllib.request
+
+              base_url = "http://formatec-api"
+              with urllib.request.urlopen(f"{base_url}/health", timeout=5) as response:
+                  health = json.load(response)
+              assert health["status"] == "ok", health
+              assert health["environment"] == "production", health
+
+              with urllib.request.urlopen(f"{base_url}/api/stages", timeout=5) as response:
+                  stages = json.load(response)
+              assert stages["count"] == 5, stages
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
