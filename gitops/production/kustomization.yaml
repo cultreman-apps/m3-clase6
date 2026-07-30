@@ -5,10 +5,10 @@ resources:
   - ../../k8s/base
 images:
   - name: formatec-api
-    newName: ghcr.io/replace/after-first-workflow
-    newTag: bootstrap
+    newName: ghcr.io/cultreman-apps/m3-clase6
+    newTag: sha-102e822ae8b9aa2649807ccea867e577ee421e69
 labels:
   - pairs:
-      app.kubernetes.io/version: bootstrap
+      app.kubernetes.io/version: sha-102e822ae8b9aa2649807ccea867e577ee421e69
     includeSelectors: false
     includeTemplates: true
