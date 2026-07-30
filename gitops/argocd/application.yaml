@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: __REPO_URL__
+    repoURL: repoURL: https://github.com/cultreman-apps/m3-clase6.git
     targetRevision: gitops
     path: gitops/production
   destination:
